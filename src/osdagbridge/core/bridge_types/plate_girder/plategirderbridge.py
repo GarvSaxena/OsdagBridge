@@ -3910,6 +3910,20 @@ class PlateGirderBridge:
         """Return (nodes, members) dicts built from the active openseespy model."""
         return build_nodes_members()
 
+    def get_transverse_groups(self) -> dict:
+        """Return transverse member plot groups: ``{label: [frame_tags, ...]}``.
+
+        Classification happens once in ``results_data._build_full_data`` so the
+        UI and plot generator consume identical element groupings.
+        """
+        data = self.result_data or {}
+        groups = data.get("transverse_groups") or {}
+        return {
+            label: [list(frame) for frame in frames]
+            for label, frames in groups.items()
+            if frames
+        }
+
     def get_edge_dist(self) -> float:
         """Return the deck overhang distance (0.0 when no overhang)."""
         return self.output_dict.get(KEY_TS_DECK_OVERHANG) or 0.0

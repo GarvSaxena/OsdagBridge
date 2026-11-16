@@ -5,8 +5,8 @@ Author: Arushi
 """
 from osdagbridge.core.utils.common import *
 import math
-from PySide6.QtWidgets import QWidget, QPushButton, QScrollArea
-from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QSize
+from PySide6.QtWidgets import QWidget, QPushButton, QScrollArea, QLineEdit
+from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QSize, QEvent, Signal
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygonF, QIcon
 from .cad_cross_section import CrossSectionCADWidget
 
@@ -27,7 +27,12 @@ LEADER_TEXT_OFFSET = 25    # leader label distance
 
 class TopViewCADWidget(QWidget):
     """Widget for drawing bridge top view"""
-    
+
+    # Emitted when an editable dimension label is edited in place.
+    # Carries the canonical common.py key and the value in the unit used by
+    # the main input dictionary (metres for span / girder spacing).
+    parameter_edited = Signal(str, float)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.show_dimensions = True
@@ -38,6 +43,11 @@ class TopViewCADWidget(QWidget):
         # top view hover tracking 
         self.top_view_hover_zones = []  # list of (QRectF, element_type)
         self.hovered_top_view_element = None
+        # editable label regions: list of (QRectF, key, value, decimals)
+        # value is already expressed in the main input dict unit.
+        self.editable_labels = []
+        self._label_editor = None
+        self._hovered_editable = False
         
         # Zoom level for this widget
         self.zoom_level = 1.0
@@ -440,7 +450,11 @@ class TopViewCADWidget(QWidget):
 
 
     def eventFilter(self, obj, event):
-        """Filter events to catch viewport resize"""
+        """Filter events to catch viewport resize and inline-editor keys"""
+        if obj is self._label_editor and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Escape:
+                self._cancel_label_edit()
+                return True
         if obj == (self.scroll_area.viewport() if self.scroll_area else None):
             if event.type() == event.Type.Resize:
                 # Viewport resized - reposition buttons
@@ -465,7 +479,16 @@ class TopViewCADWidget(QWidget):
     def mouseMoveEvent(self, event):
         """Handle mouse hover for top view"""
         pos = event.position() if hasattr(event, 'position') else event.pos()
-        
+
+        # Editable labels advertise themselves with an I-beam cursor.
+        over_editable = any(rect.contains(pos) for rect, *_ in self.editable_labels)
+        if over_editable != self._hovered_editable:
+            self._hovered_editable = over_editable
+            if over_editable:
+                self.setCursor(Qt.IBeamCursor)
+            else:
+                self.unsetCursor()
+
         # top view hover logic
         new_hovered = None
         for rect, element_type in self.top_view_hover_zones:
@@ -477,9 +500,76 @@ class TopViewCADWidget(QWidget):
             self.hovered_top_view_element = new_hovered
             self.update()
 
+    # ── Inline label editing ────────────────────────────────────────────────
+    def mouseDoubleClickEvent(self, event):
+        """Start in-place editing for an editable dimension label."""
+        pos = event.position() if hasattr(event, 'position') else event.pos()
+        for rect, key, value, decimals in self.editable_labels:
+            if rect.contains(pos):
+                self._begin_label_edit(rect, key, value, decimals)
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def _begin_label_edit(self, rect, key, value, decimals):
+        self._cancel_label_edit()
+
+        editor = QLineEdit(self)
+        editor.setObjectName("cad_inline_editor")
+        editor.setFont(QFont('Arial', 9))
+        editor.setAlignment(Qt.AlignCenter)
+        editor.setStyleSheet(
+            "QLineEdit { border: 1px solid #90AF13; background: #fffde7;"
+            " padding: 0px 2px; selection-background-color: #90AF13; }"
+        )
+        editor.setText(f"{float(value):.{int(decimals)}f}")
+        editor.selectAll()
+        editor.setGeometry(self._editor_geometry(rect))
+        editor.installEventFilter(self)
+        self._label_editor = editor
+        editor.editingFinished.connect(
+            lambda ed=editor, k=key: self._commit_label_edit(ed, k)
+        )
+        editor.show()
+        editor.setFocus(Qt.MouseFocusReason)
+
+    @staticmethod
+    def _editor_geometry(rect):
+        """Return a comfortable editing rectangle centred on a label rect."""
+        target = rect.adjusted(-6, -4, 6, 4)
+        if target.width() < 64:
+            grow = (64 - target.width()) / 2
+            target.adjust(-grow, 0, grow, 0)
+        if target.height() < 22:
+            grow = (22 - target.height()) / 2
+            target.adjust(0, -grow, 0, grow)
+        return target.toRect()
+
+    def _commit_label_edit(self, editor, key):
+        if editor is not self._label_editor:
+            return
+        text = editor.text().strip()
+        self._cancel_label_edit()
+
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(value) or value <= 0:
+            return
+
+        self.parameter_edited.emit(key, value)
+
+    def _cancel_label_edit(self):
+        editor = self._label_editor
+        self._label_editor = None
+        if editor is not None:
+            editor.blockSignals(True)
+            editor.deleteLater()
+
     def paintEvent(self, event):
         # clear hover zones at start of each paint
         self.top_view_hover_zones = []
+        self.editable_labels = []
         
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -489,7 +579,8 @@ class TopViewCADWidget(QWidget):
         
     def draw_text_with_background(self, painter, x, y, text,
                               bg_color=QColor(255, 255, 255, 230), 
-                              text_color=QColor(0, 0, 0), font_size=9, bold=False):
+                              text_color=QColor(0, 0, 0), font_size=9, bold=False,
+                              editable=None):
 
         # defensive check: font size must be > 0
         font_size = max(1, font_size)
@@ -514,6 +605,11 @@ class TopViewCADWidget(QWidget):
             max_width + 2 * padding,
             total_height + 2 * padding
         )
+
+        if editable is not None:
+            # editable = (key, value, decimals)
+            key, value, decimals = editable
+            self.editable_labels.append((QRectF(bg_rect), key, float(value), int(decimals)))
 
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(bg_color))
@@ -1299,7 +1395,8 @@ class TopViewCADWidget(QWidget):
         
         self.draw_dimension_arrow_with_extensions_up(
             painter, x1_span, dim_y2, x2_span, dim_y2,
-            label_span, last_girder_y
+            label_span, last_girder_y,
+            editable=(KEY_SPAN, span_m, 2)
         )
 
         # GIRDER SPACING dimension (always visible)
@@ -1334,7 +1431,8 @@ class TopViewCADWidget(QWidget):
                 painter, label_x, label_y,
                 label_text,
                 QColor(255, 255, 255, 240),
-                QColor(0, 0, 0), 9, False
+                QColor(0, 0, 0), 9, False,
+                editable=(KEY_TS_GIRDER_SPACING, gs_m, 2)
             )
 
         # CL OF BEARING labels - ALWAYS VISIBLE (moved outside hover condition)
@@ -1410,7 +1508,7 @@ class TopViewCADWidget(QWidget):
             self.draw_clean_leader_line(painter, target_x, target_y, label_x, label_y,
                                     "End Diaphragm", CAD_DARK_GREY, QColor(139, 69, 19))
 
-    def draw_dimension_arrow_with_extensions_up(self, painter, x1, y1, x2, y2, text, girder_y):
+    def draw_dimension_arrow_with_extensions_up(self, painter, x1, y1, x2, y2, text, girder_y, editable=None):
         """Dimension line with arrows and extension lines going UP to girder level (dimension below)"""
         painter.setPen(QPen(QColor(0, 0, 0), 1.0))
         
@@ -1462,7 +1560,8 @@ class TopViewCADWidget(QWidget):
         text_width = metrics.boundingRect(text).width()
         
         self.draw_text_with_background(painter, text_x - text_width/2, text_y, text, 
-                                    QColor(255, 255, 255, 240), QColor(0, 0, 0), 9, False)
+                                    QColor(255, 255, 255, 240), QColor(0, 0, 0), 9, False,
+                                    editable=editable)
 
 
     def draw_skewed_dimension_arrow(self, painter, x1, y1, x2, y2, text, skew_rad):

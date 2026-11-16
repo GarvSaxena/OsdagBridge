@@ -858,12 +858,24 @@ class OutputDock(QWidget):
             combo_design.blockSignals(False)
 
         # 2. Update Analysis Member dropdown
+        # Transverse member types (end diaphragms, intermediate cross bracings)
+        # are appended after the longitudinal girders, one entry per type.
+        transverse_items = []
+        if hasattr(self.backend, "get_transverse_groups"):
+            try:
+                transverse_items = [
+                    label for label, frames in self.backend.get_transverse_groups().items()
+                    if frames
+                ]
+            except Exception:
+                transverse_items = []
+
         from osdagbridge.core.utils.common import KEY_ANALYSIS_MEMBER
         combo_analysis = self._w(KEY_ANALYSIS_MEMBER)
         if combo_analysis is not None:
             combo_analysis.blockSignals(True)
             combo_analysis.clear()
-            combo_analysis.addItems(["All"] + items)
+            combo_analysis.addItems(["All"] + items + transverse_items)
             combo_analysis.setCurrentIndex(0)
             combo_analysis.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo_analysis.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)

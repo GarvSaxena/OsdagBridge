@@ -10,7 +10,7 @@ bridge-wrapper dependency.
 
 from __future__ import annotations
 import json
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -92,6 +92,159 @@ def _build_nodes_members() -> tuple[dict, dict]:
         for e in ops.getEleTags()
     }
     return nodes, members
+
+
+# ── Transverse member grouping (for result plots) ───────────────────────────
+# One dropdown entry per transverse type.  Element tags are classified, never
+# split: a transverse frame (one line across the bridge) stays a single frame
+# even when it contains diagonals or chords.
+
+TRANSVERSE_GROUP_END_DIAPHRAGMS = "End Diaphragms"
+TRANSVERSE_GROUP_INTERMEDIATE_BRACINGS = "Intermediate Cross Bracings"
+
+
+def _frame_station(frame, members, nodes) -> float:
+    """Mean longitudinal (X) station of a transverse frame."""
+    xs = [nodes[n][0] for t in frame for n in members[t]]
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _order_frame(tags, members, nodes) -> list:
+    """Order the elements of one transverse frame from one edge to the other."""
+    node_links = defaultdict(list)
+    for tag in tags:
+        for node in members[tag]:
+            node_links[node].append(tag)
+
+    endpoints = [node for node, linked in node_links.items() if len(linked) == 1]
+    if not endpoints:
+        # Closed loop / ambiguous topology: order by transverse coordinate.
+        return sorted(tags, key=lambda t: nodes[members[t][0]][2])
+
+    current = min(endpoints, key=lambda n: nodes[n][2])
+    ordered, used = [], set()
+    while True:
+        next_tag = None
+        for tag in node_links[current]:
+            if tag not in used:
+                next_tag = tag
+                break
+        if next_tag is None:
+            break
+        ordered.append(next_tag)
+        used.add(next_tag)
+        n1, n2 = members[next_tag]
+        current = n2 if n1 == current else n1
+
+    # Branches that were not part of the main walk (e.g. diagonals).
+    ordered.extend(tag for tag in tags if tag not in used)
+    return ordered
+
+
+def _build_frames(tags, members, nodes) -> list:
+    """Split a tag set into connected frames, each ordered across the width."""
+    tags = {int(t) for t in tags if int(t) in members}
+    if not tags:
+        return []
+
+    node_to_tags = defaultdict(list)
+    for tag in tags:
+        for node in members[tag]:
+            node_to_tags[node].append(tag)
+
+    seen, frames = set(), []
+    for seed in sorted(tags):
+        if seed in seen:
+            continue
+        component, stack = [], [seed]
+        seen.add(seed)
+        while stack:
+            tag = stack.pop()
+            component.append(tag)
+            for node in members[tag]:
+                for neighbour in node_to_tags[node]:
+                    if neighbour not in seen:
+                        seen.add(neighbour)
+                        stack.append(neighbour)
+        frames.append(_order_frame(component, members, nodes))
+
+    frames.sort(key=lambda frame: _frame_station(frame, members, nodes))
+    return frames
+
+
+def classify_transverse_members(nodes, members, groups=None, transverse_members=None) -> dict:
+    """Group transverse element tags into plottable types and frames.
+
+    Parameters
+    ----------
+    nodes : dict[int, list[float]]
+        Node tag → [x, y, z] (x = span, y = vertical, z = bridge width).
+    members : dict[int, list[int]]
+        Element tag → [node_i, node_j].
+    groups : dict, optional
+        ospgrillage element groups (``start_edge``, ``end_edge``,
+        ``transverse_slab``) used to separate end diaphragms from intermediate
+        cross bracings without guessing.
+    transverse_members : list, optional
+        Pre-classified transverse element tags.  When omitted, members whose
+        end nodes differ in Y or Z are treated as transverse.
+
+    Returns
+    -------
+    dict[str, list[list[int]]]
+        ``{group_label: [frame_tags, ...]}``.  Each frame is an ordered list of
+        element tags forming one transverse line across the bridge.
+    """
+    groups = groups or {}
+    members = {int(k): [int(v[0]), int(v[1])] for k, v in members.items()}
+    nodes = {int(k): list(v) for k, v in nodes.items()}
+
+    if transverse_members is None:
+        candidates = set()
+        for tag, (n1, n2) in members.items():
+            if n1 not in nodes or n2 not in nodes:
+                continue
+            same_y = abs(nodes[n1][1] - nodes[n2][1]) < 1e-3
+            same_z = abs(nodes[n1][2] - nodes[n2][2]) < 1e-3
+            if not (same_y and same_z):
+                candidates.add(tag)
+    else:
+        candidates = {int(t) for t in transverse_members if int(t) in members}
+
+    if not candidates:
+        return {}
+
+    end_tags = {
+        int(t)
+        for t in list(groups.get("start_edge") or []) + list(groups.get("end_edge") or [])
+        if int(t) in candidates
+    }
+    intermediate_tags = {
+        int(t) for t in (groups.get("transverse_slab") or []) if int(t) in candidates
+    }
+
+    # Elements not covered by the ospgrillage groups are classified by their
+    # longitudinal position: the global extremes are end diaphragms.
+    unclassified = candidates - end_tags - intermediate_tags
+    if unclassified:
+        all_x = [coord[0] for coord in nodes.values()]
+        x_min, x_max = min(all_x), max(all_x)
+        tol = max(1e-6, 1e-3 * max(1.0, abs(x_max - x_min)))
+        for frame in _build_frames(unclassified, members, nodes):
+            station = _frame_station(frame, members, nodes)
+            if abs(station - x_min) <= tol or abs(station - x_max) <= tol:
+                end_tags.update(frame)
+            else:
+                intermediate_tags.update(frame)
+
+    result = {}
+    end_frames = _build_frames(end_tags, members, nodes)
+    intermediate_frames = _build_frames(intermediate_tags, members, nodes)
+    if end_frames:
+        result[TRANSVERSE_GROUP_END_DIAPHRAGMS] = end_frames
+    if intermediate_frames:
+        result[TRANSVERSE_GROUP_INTERMEDIATE_BRACINGS] = intermediate_frames
+    return result
 
 
 def dump_full_data(
@@ -427,6 +580,9 @@ def _build_full_data(model, edge_dist: float = 0.0, dataset=None, lazy: bool = F
         "groups": groups,
         "longitudinal_members": longitudinal_members,
         "transverse_members": transverse_members,
+        "transverse_groups": classify_transverse_members(
+            nodes, members, groups, transverse_members
+        ),
         "edge_dist": float(edge_dist),
         "loadcases": list(loadcases),
         "force_components": force_components,

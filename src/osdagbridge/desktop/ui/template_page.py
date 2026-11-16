@@ -748,7 +748,16 @@ class CustomWindow(QWidget):
                     loadcases = self.backend.get_available_loadcases()
                     nodes, members = self.backend.get_nodes_members()
                     edge_dist = self.backend.get_edge_dist()
-                    self.plots_widget.setup(ds_all, loadcases, nodes, members, edge_dist=edge_dist)
+                    transverse_groups = (
+                        self.backend.get_transverse_groups()
+                        if hasattr(self.backend, "get_transverse_groups")
+                        else {}
+                    )
+                    self.plots_widget.setup(
+                        ds_all, loadcases, nodes, members,
+                        edge_dist=edge_dist,
+                        transverse_groups=transverse_groups,
+                    )
                     self.plots_widget.link_output_dock(self.output_dock)
 
                     # Render 3D cad using the parameters from Backend
@@ -788,6 +797,10 @@ class CustomWindow(QWidget):
         # This will update the CAD whenever any input field changes
         if hasattr(self.input_dock, 'input_value_changed'):
             self.input_dock.input_value_changed.connect(self.update_cad_from_inputs)        
+
+        # Inline 2D-CAD label editing writes back through the input dictionaries.
+        if hasattr(self.cad_comp_widget, 'parameter_edited'):
+            self.cad_comp_widget.parameter_edited.connect(self._on_cad_parameter_edited)
             
     # Function for saving input dictionary into an OSI file
     def saveOSI_inputs(self):
@@ -901,6 +914,78 @@ class CustomWindow(QWidget):
 
         # Apply state to CAD UI & Update Cad-State
         self.cad_comp_widget.update_from_osdag_inputs(self.input_dict)
+
+    def _on_cad_parameter_edited(self, key: str, value: float):
+        """
+        Apply an inline 2D-CAD label edit to the active design dictionaries.
+
+        Editable CAD labels emit canonical ``common.py`` keys with values in the
+        same unit the main input dictionary expects (metres for span, carriageway
+        width and girder spacing; millimetres for deck thickness).
+        """
+        # Layout fields owned by Additional Inputs (girder spacing, deck
+        # thickness) are validated there. sync_parameter_from_cad also recomputes
+        # linked values such as overhang and overall width, so the full layout
+        # solver must not run afterwards — it would overwrite the user's spacing.
+        layout_owned = key in (KEY_TS_GIRDER_SPACING, KEY_TS_DECK_THICKNESS)
+
+        dlg = self._additional_inputs_dialog
+        if layout_owned and dlg is None:
+            # The dialog owns layout validation/derivation even when it has not
+            # been opened yet; construct the reusable instance on demand.
+            dlg = self._get_additional_inputs()
+
+        synced = False
+        if dlg is not None and hasattr(dlg, "sync_parameter_from_cad"):
+            try:
+                # The dialog is bound to the template dictionary when it first
+                # opens. A CAD edit can happen before that, so seed it from the
+                # live dict.
+                if not dlg.working_input_dict:
+                    dlg.set_input_dictionary(self.input_dict)
+
+                dlg.sync_parameter_from_cad(key, value)
+                synced = True
+            except Exception:
+                # Basic inputs are not complete enough to populate the dialog
+                # yet (e.g. span/carriageway still empty). Fall through and
+                # apply the edit directly instead of dropping it.
+                bridge_logger.warning(
+                    "Could not sync CAD edit for %s into Additional Inputs", key
+                )
+
+        if synced:
+            # sync_parameter_from_cad may correct the value (deck thickness) and
+            # recompute linked layout fields; mirror them into the live dict.
+            for linked in (
+                key,
+                KEY_TS_GIRDER_SPACING,
+                KEY_TS_DECK_OVERHANG,
+                KEY_TS_NO_OF_GIRDERS,
+                KEY_TS_OVERALL_WIDTH,
+            ):
+                if linked in dlg.working_input_dict:
+                    self.input_dict[linked] = dlg.working_input_dict[linked]
+        else:
+            self.input_dict[key] = value
+
+        if layout_owned:
+            self.update_cad_from_inputs()
+            return
+
+        # Basic dock fields (span / carriageway) go through the standard
+        # validation + redraw path, which also emits input_value_changed.
+        handled = False
+        if self.input_dock is not None:
+            handled = self.input_dock.set_input_value(key, value)
+
+        if not handled:
+            try:
+                solve_extend_basic_input_dict(self.input_dict)
+            except Exception:
+                # If the solver fails mid-edit, still redraw with raw values.
+                pass
+            self.update_cad_from_inputs()
 
     #---------------------------------Docking-Icons-Functionality-START----------------------------------------------
 
