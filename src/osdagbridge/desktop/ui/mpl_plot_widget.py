@@ -22,6 +22,7 @@ from osdagbridge.core.bridge_types.plate_girder.plot_generator import (
     build_figure_bmd,
     build_figure_deflection,
     build_figure_grillage,
+    build_figure_transverse,
     _add_node_number_labels,
     _add_element_number_labels,
     FORCE_MAP,
@@ -172,6 +173,8 @@ class MplPlotWidget(QWidget):
         self._nodes     = {}
         self._members   = {}
         self._edge_dist = 0.0
+        # Transverse member plot groups: {label: [ordered frame tags, ...]}
+        self._transverse_groups = {}
         self._output_dock = None
         self._summary_data = {}
 
@@ -407,12 +410,13 @@ class MplPlotWidget(QWidget):
                     pass
 
     def setup(self, ds_all, loadcases: list, nodes: dict, members: dict,
-              edge_dist: float = 0.0):
+              edge_dist: float = 0.0, transverse_groups: dict | None = None):
         self._ds_all    = ds_all
         self._loadcases = list(loadcases)
         self._nodes     = nodes
         self._members   = members
         self._edge_dist = edge_dist
+        self._transverse_groups = transverse_groups or {}
 
         if hasattr(self, '_fig') and self._fig.axes:
             ax = self._fig.axes[0]
@@ -538,7 +542,15 @@ class MplPlotWidget(QWidget):
 
         # (Your existing if/elif/else block to build the new figures)
         eng_scale = self._eng_scale
-        if force_key in _SFD_KEYS:
+        if sel_girder in self._transverse_groups:
+            # Transverse member types (end diaphragms, intermediate cross
+            # bracings): one polyline per transverse frame.
+            self._fig, self._summary_data = build_figure_transverse(
+                ds, force_key, self._nodes, self._members,
+                self._transverse_groups[sel_girder],
+                eng_scale=eng_scale, group_label=sel_girder,
+            )
+        elif force_key in _SFD_KEYS:
             self._fig, self._summary_data = build_figure_sfd(
                 ds, force_key, self._nodes, self._members,
                 edge_dist=self._edge_dist, eng_scale=eng_scale,

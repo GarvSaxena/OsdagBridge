@@ -3,6 +3,7 @@ Additional Inputs Widget for Highway Bridge Design
 Provides detailed input fields for manual bridge parameter definition
 """
 from copy import deepcopy
+import re
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QTabBar, QLabel, QLineEdit,
@@ -54,6 +55,13 @@ class AdditionalInputs(QDialog):
         # TO tract additional input is opened first time or not.
         # This is required for end connectors
         self.interacted_first = True
+
+        # Tracks whether the working dictionary has unsaved user edits.
+        self.is_modified = False
+
+        # Schema-derived (mode widget, value widget, label) triples for every
+        # "Custom" dropdown. Used to reject empty custom values on Save.
+        self._custom_field_pairs = self._build_custom_field_pairs()
  
         # Store all Compute functions to be called at Design
         self._compute_functions = []
@@ -71,6 +79,9 @@ class AdditionalInputs(QDialog):
             
         self.setSizeGripEnabled(True)
         self.init_ui()
+        # Building the UI fires some change handlers; the dialog is not
+        # "modified" until the user edits a field after it is populated.
+        self.is_modified = False
         self.setStyleSheet("""
             QDialog {
                 background-color: #ffffff;
@@ -228,6 +239,134 @@ class AdditionalInputs(QDialog):
             return True
         return super().eventFilter(obj, event)
 
+    # ── Custom-field Validation ──────────────────────────────────────────────
+
+    @staticmethod
+    def _iter_schema_rows(schema):
+        """Yield each row's field-definition list from a UI schema.
+
+        Handles the nested shapes used by ADDITIONAL_INPUTS_SCHEMA:
+        ``rows``/``sections``/``tabs``/``header``/``primary_fields`` and a
+        tab item that carries its schema under ``schema``.
+        """
+        if isinstance(schema, list):
+            for item in schema:
+                yield from AdditionalInputs._iter_schema_rows(item)
+            return
+        if not isinstance(schema, dict):
+            return
+
+        rows = schema.get("rows")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict) and isinstance(row.get("fields"), list):
+                    yield row["fields"]
+
+        for key in ("sections", "tabs", "header", "primary_fields", "schema"):
+            child = schema.get(key)
+            if isinstance(child, (dict, list)):
+                yield from AdditionalInputs._iter_schema_rows(child)
+
+    @staticmethod
+    def _clean_label(label, fallback=""):
+        """Strip HTML markup and trailing punctuation from a schema label."""
+        text = re.sub(r"<[^>]+>", "", str(label or fallback))
+        return text.strip().rstrip(":").strip()
+
+    @classmethod
+    def _build_custom_field_pairs(cls):
+        """Derive (mode widget, value widget, label) pairs from the schema.
+
+        Only fields whose dropdown offers a "Custom" option are included. No
+        parameter names are hardcoded: widget object names come from schema ids
+        (the central ``common.py`` keys) and labels come from the schema itself.
+        """
+        pairs = []
+        text_types = (TYPE_TEXTBOX, TYPE_MODE_LINE, TYPE_MODE_VALUE)
+
+        for fields in cls._iter_schema_rows(ADDITIONAL_INPUTS_SCHEMA):
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+                field_id = field.get("id") or ""
+                ftype = field.get("type")
+
+                if not field_id:
+                    continue
+
+                if ftype in (TYPE_MODE_LINE, TYPE_MODE_VALUE):
+                    if "Custom" in (field.get("mode_choices") or []):
+                        pairs.append({
+                            "mode":  field_id + ".mode",
+                            "value": field_id + ".value",
+                            "label": cls._clean_label(field.get("label"), field_id),
+                        })
+
+                elif ftype == TYPE_COMBOBOX and "Custom" in (field.get("choices") or []):
+                    # A plain dropdown may enable a sibling text field in the
+                    # same row (e.g. Railing "Mode" + "Load").
+                    for other in fields:
+                        if not isinstance(other, dict) or other is field:
+                            continue
+                        if other.get("type") in text_types and other.get("id"):
+                            pairs.append({
+                                "mode":  field_id,
+                                "value": other["id"],
+                                "label": cls._clean_label(other.get("label"), other["id"]),
+                            })
+                            break
+
+        return pairs
+
+    def _is_in_active_tab(self, widget) -> bool:
+        """Return False when *widget* lives inside a disabled tab."""
+        child = widget
+        parent = widget.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QTabWidget):
+                index = parent.indexOf(child)
+                if index != -1 and not parent.isTabEnabled(index):
+                    return False
+            child = parent
+            parent = parent.parentWidget()
+        return True
+
+    def _validate_custom_fields(self) -> bool:
+        """Reject Save when a "Custom" dropdown has an empty companion value."""
+        for pair in self._custom_field_pairs:
+            mode_widget = self.findChild(QComboBox, pair["mode"])
+            if mode_widget is None:
+                continue
+            if mode_widget.currentText().strip() != "Custom":
+                continue
+            if not self._is_in_active_tab(mode_widget):
+                continue
+
+            value_widget = self.findChild(QWidget, pair["value"])
+            if value_widget is None:
+                continue
+
+            if isinstance(value_widget, QLineEdit):
+                is_empty = not value_widget.text().strip()
+            elif isinstance(value_widget, QComboBox):
+                is_empty = not value_widget.currentText().strip()
+            else:
+                continue
+
+            if is_empty:
+                CustomMessageBox(
+                    title="Input Error",
+                    text=(
+                        f"Error: The custom value for '{pair['label']}' "
+                        "cannot be empty."
+                    ),
+                    buttons=["OK"],
+                    dialogType=MessageBoxType.Critical,
+                ).exec()
+                return False
+
+        return True
+
     def set_input_dictionary(self, input_dict: dict):  # lifecycle: sets default/working dicts and wires END_CONNECTORS on first open
         self.default_input_dict = input_dict
         self.working_input_dict = deepcopy(input_dict)
@@ -245,6 +384,9 @@ class AdditionalInputs(QDialog):
             self.interacted_first = False
             from osdagbridge.core.bridge_types.plate_girder.ui_fields_additional_input import END_CONNECTORS
             UIBuilder.wire_end_connectors(END_CONNECTORS, ai=self)
+
+        # Freshly loaded dictionary has no unsaved edits yet.
+        self.is_modified = False
 
     def set_defaults(self) -> None:  # lifecycle: populates all widgets from working_input_dict; called at init time only
         """
@@ -453,6 +595,8 @@ class AdditionalInputs(QDialog):
         if active_tab is None:
             return
 
+        self.is_modified = True
+
         if hasattr(active_tab, "reset_active_tab_defaults"):
             active_tab.reset_active_tab_defaults()
             return
@@ -504,9 +648,48 @@ class AdditionalInputs(QDialog):
             if hasattr(tab_widget, "refresh_active_tab"):
                 tab_widget.refresh_active_tab()
 
+    # ── Close / Discard Handling ─────────────────────────────────────────────────
+
+    def closeEvent(self, event):
+        """Warn before discarding unsaved input edits."""
+        if not self.is_modified:
+            super().closeEvent(event)
+            return
+
+        choice = CustomMessageBox(
+            title="Unsaved Changes",
+            text=(
+                "You have unsaved changes. Closing this window will discard "
+                "them. Do you want to proceed?"
+            ),
+            buttons=["Discard", "Cancel"],
+            dialogType=MessageBoxType.Warning,
+        ).exec()
+
+        if choice != "Discard":
+            event.ignore()
+            return
+
+        # Discard: roll the working state back to the last saved dictionary.
+        self.working_input_dict = deepcopy(self.default_input_dict)
+        self.set_defaults()
+        self.is_modified = False
+        event.accept()
+
+    def keyPressEvent(self, event):
+        """Route Escape through closeEvent so unsaved edits are not lost."""
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(event)
+
     # ── Dialog Persistence ───────────────────────────────────────────────────────
 
     def _save_inputs(self):  # on_change: validates all tabs then commits working_input_dict and emits CAD update signal
+
+        # A "Custom" dropdown must have a value before the dictionary is committed.
+        if not self._validate_custom_fields():
+            return
 
         # Flush the currently-displayed stiffener member's widgets before committing.
         # _save_stiffener_member_data otherwise only runs when switching *away* from a
@@ -517,6 +700,7 @@ class AdditionalInputs(QDialog):
             self._save_stiffener_member_data(combo.currentText().strip())
 
         self.default_input_dict.update(self.working_input_dict)
+        self.is_modified = False
         from osdagbridge.desktop.ui.docks.cad_cross_section import CrossSectionCADWidget
         cad = self.findChild(CrossSectionCADWidget, KEY_TS_CAD_PREVIEW)
         if cad:
@@ -598,6 +782,7 @@ class AdditionalInputs(QDialog):
         self._update_additional_input_cad()
 
     def _update_input_dict(self, key: str, value: str):  # utility: writes a value to working_input_dict, falling back to default if empty
+        self.is_modified = True
         if value is None or value == "":
             self.working_input_dict[key] = self.default_input_dict.get(key)
         else:
@@ -608,6 +793,57 @@ class AdditionalInputs(QDialog):
                     self.working_input_dict[key] = float(value)
                 except (ValueError, TypeError):
                     self.working_input_dict[key] = value
+
+    def sync_parameter_from_cad(self, key: str, value) -> None:
+        """Reflect a 2D-CAD label edit in this dialog without re-running validation.
+
+        The Additional Inputs dialog owns the widgets for layout fields such as
+        girder spacing and deck thickness. A CAD edit is an explicit, already
+        validated action, so the value is written to both dictionaries and the
+        matching widget is refreshed with signals blocked.
+
+        Girder spacing is linked to overhang, overall width and girder count;
+        those derived values are recomputed here so the main input dictionary
+        (and therefore the CAD redraw) stays internally consistent.
+        """
+        # Deck thickness has a simple, independent range rule — apply it so an
+        # out-of-range CAD edit is corrected instead of silently accepted.
+        if key == KEY_TS_DECK_THICKNESS:
+            result = self.validator.validate_additional_inputs(
+                key, {**self.working_input_dict, key: value}
+            )
+            if result is not None:
+                corrected, message = result
+                value = corrected
+                CustomMessageBox(
+                    title="Input Error",
+                    text=message,
+                    dialogType=MessageBoxType.Warning,
+                ).exec()
+
+        self.working_input_dict[key] = value
+        self.default_input_dict[key] = value
+
+        widget = self.findChild(QWidget, key)
+        if isinstance(widget, QLineEdit):
+            text = f"{float(value):.2f}" if isinstance(value, (int, float)) else str(value)
+            if text.endswith(".00"):
+                text = text[:-3]
+            widget.blockSignals(True)
+            widget.setText(text)
+            widget.blockSignals(False)
+
+        if key == KEY_TS_GIRDER_SPACING:
+            if self.update_girder_layout("spacing"):
+                for linked in (
+                    KEY_TS_GIRDER_SPACING,
+                    KEY_TS_DECK_OVERHANG,
+                    KEY_TS_NO_OF_GIRDERS,
+                    KEY_TS_OVERALL_WIDTH,
+                    KEY_TS_NO_OF_FOOTPATHS,
+                ):
+                    if linked in self.working_input_dict:
+                        self.default_input_dict[linked] = self.working_input_dict[linked]
 
     # ── Tab Active State Utility ─────────────────────────────────────────────────
 

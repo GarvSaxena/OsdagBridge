@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional, Union
 
+from osdagbridge.core.bridge_components.sub_structure.params import SubstructureParameters
+
 __all__ = [
     "SectionComponent",
     "Point",
@@ -396,5 +398,10 @@ class BridgeParametersDTO:
     girder_segments: list[GirderSegmentDTO] = field(default_factory=list)
     girder_segments_dict: dict[int, list[GirderSegmentDTO]] = field(default_factory=dict)
     stiffeners_dict: dict[int, dict] = field(default_factory=dict)
+
+    # --- Substructure (parametric override; defaults live in the builder) ---
+    #: When ``None`` the screening-task defaults from
+    #: :class:`SubstructureParameters` are used (800 mm piers, 3000 mm caps...).
+    substructure: Optional[SubstructureParameters] = None
 
 

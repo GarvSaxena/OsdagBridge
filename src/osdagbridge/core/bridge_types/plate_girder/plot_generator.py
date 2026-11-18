@@ -1552,6 +1552,270 @@ def build_figure_deflection(ds, disp_key, nodes, members, edge_dist=0.0, eng_sca
     return fig, summary_data
 
 
+def _find_component_name(data_array, wanted):
+    """Return the actual Component coordinate matching *wanted* (case-insensitive)."""
+    try:
+        components = [str(c) for c in data_array.coords["Component"].values]
+    except Exception:
+        return None
+    for comp in components:
+        if comp.lower() == str(wanted).lower():
+            return comp
+    return None
+
+
+def build_figure_transverse(ds, force_key, nodes, members, frames,
+                            eng_scale=1.0, group_label="Transverse Members"):
+    """Build a 3-D figure for one transverse member group.
+
+    Each frame (one transverse line across the bridge) is drawn as a single
+    polyline: x = span station, y = bridge width, z = force/displacement.
+    Elements are never split by component, so a frame containing diagonals or
+    chords remains one continuous component.
+
+    Parameters
+    ----------
+    ds         : xarray.Dataset — one load-case slice.
+    force_key  : str           — FORCE_MAP / DISP_MAP key.
+    nodes      : dict          — {tag: [x, y, z]}
+    members    : dict          — {tag: [n1, n2]}
+    frames     : list[list[int]] — ordered element tags per transverse line.
+    eng_scale  : float         — diagram geometry scale.
+    group_label: str           — dropdown label used in the title/summary.
+    """
+    v_scale = _value_plot_scale(eng_scale)
+    is_disp = force_key in DISP_MAP
+
+    if is_disp:
+        label = DISP_DISPLAY.get(force_key, force_key)
+        unit = "mm"
+        _disp_map = {"dx": "x", "dy": "y", "dz": "z"}
+        wanted = _disp_map.get(DISP_MAP.get(force_key, ""), DISP_MAP.get(force_key, ""))
+        actual_comp = _find_component_name(ds["displacements"], wanted) or wanted
+        comp_i = comp_j = None
+    else:
+        label = FORCE_DISPLAY.get(force_key, force_key)
+        unit = "kN"
+        comp_i_name, comp_j_name = FORCE_MAP[force_key]
+        comp_i = _find_component_name(ds["forces"], comp_i_name)
+        comp_j = _find_component_name(ds["forces"], comp_j_name)
+        if comp_i is None or comp_j is None:
+            raise KeyError(
+                f"Force components {comp_i_name}/{comp_j_name} not found in dataset"
+            )
+
+    def value_at(tag, node, end):
+        if is_disp:
+            raw = float(
+                ds["displacements"].sel(Node=int(node), Component=actual_comp).values
+            )
+            raw *= 1000.0  # m → mm
+            if str(actual_comp).lower() in ("y", "z"):
+                raw = -raw
+            return raw
+        comp = comp_i if end == "i" else comp_j
+        return float(
+            ds["forces"].sel(Element=int(tag), Component=comp).values
+        ) / 1000.0  # N → kN (N·m → kN·m)
+
+    fig = Figure(figsize=(14, 6), dpi=110, facecolor="white")
+    ax = fig.add_subplot(111, projection="3d", facecolor="white")
+
+    all_xs = [coord[0] for coord in nodes.values()]
+    all_ys = [coord[2] for coord in nodes.values()]
+    x_min, x_max = min(all_xs), max(all_xs)
+    y_min, y_max = min(all_ys), max(all_ys)
+    x_range = (x_max - x_min) or 1.0
+    y_range = (y_max - y_min) or 1.0
+    x_pad = x_range * 0.05 if x_max != x_min else 1.0
+    y_pad = y_range * 0.05 if y_max != y_min else 1.0
+    ax.set_xlim(x_min - x_pad, x_max + x_pad)
+    ax.set_ylim(y_min - y_pad, y_max + y_pad)
+    ax.set_box_aspect([x_range, y_range, max(x_range * 0.35, 1e-6)])
+
+    _add_grillage_background(
+        ax, nodes, members,
+        show_transverse=False,
+        include_edge_longitudinals=True,
+        include_end_transverse=True,
+        show_inner_nodes=False,
+    )
+
+    palette = ["#1565C0", "#C62828", "#2E7D32", "#6A1B9A",
+               "#EF6C00", "#00838F", "#4E342E", "#AD1457"]
+
+    global_vmin, global_vmax = 0.0, 0.0
+    overall_max = None
+    overall_min = None
+    _scatter_objs, _scatter_data = [], {}
+
+    for frame_idx, frame in enumerate(frames):
+        frame = [int(t) for t in frame if int(t) in members]
+        if not frame:
+            continue
+
+        xs, ys, vals, node_ids = [], [], [], []
+        segments = []  # (start index, end index) for each element
+
+        for tag in frame:
+            n1, n2 = members[tag]
+            x1, _, y1 = nodes[n1]
+            x2, _, y2 = nodes[n2]
+
+            start = len(xs)
+            xs.extend([x1, x2])
+            ys.extend([y1, y2])
+            vals.extend([value_at(tag, n1, "i"), value_at(tag, n2, "j")])
+            node_ids.extend([n1, n2])
+            segments.append((start, start + 1))
+
+        if not xs:
+            continue
+
+        vals_arr = np.asarray(vals, dtype=float)
+        z_plot = vals_arr * v_scale
+        color = palette[frame_idx % len(palette)]
+
+        global_vmin = min(global_vmin, float(np.min(z_plot)))
+        global_vmax = max(global_vmax, float(np.max(z_plot)))
+
+        # Draw every element of the frame as its own segment in the same
+        # colour: chords and diagonals stay together as one component without
+        # forcing a zig-zag polyline through branched frames.
+        for a, b in segments:
+            ax.plot([xs[a], xs[b]], [ys[a], ys[b]], [0.0, 0.0],
+                    color="#B0BEC5", linewidth=0.8, alpha=0.5, zorder=2)
+            ax.plot([xs[a], xs[b]], [ys[a], ys[b]], [z_plot[a], z_plot[b]],
+                    color=color, linewidth=2.0, zorder=4)
+
+        sc = ax.scatter(xs, ys, z_plot, color=color, s=20,
+                        depthshade=False, zorder=5)
+        _scatter_objs.append(sc)
+        _scatter_data[id(sc)] = (node_ids, xs, ys, vals_arr)
+
+        ax.text(xs[0], ys[0], 0.0, f"T{frame_idx + 1}",
+                color="black", fontsize=10, ha="right", va="center",
+                zorder=6, gid="girder_labels")
+
+        # Extreme annotations for this frame.
+        i_max = int(np.argmax(vals_arr))
+        i_min = int(np.argmin(vals_arr))
+        if overall_max is None or vals_arr[i_max] > overall_max[0]:
+            overall_max = (float(vals_arr[i_max]), xs[i_max], ys[i_max], float(z_plot[i_max]))
+        if overall_min is None or vals_arr[i_min] < overall_min[0]:
+            overall_min = (float(vals_arr[i_min]), xs[i_min], ys[i_min], float(z_plot[i_min]))
+
+        ax.plot([xs[i_max]], [ys[i_max]], [z_plot[i_max]],
+                marker="o", markersize=8, color="black",
+                markeredgecolor="white", markeredgewidth=1.5,
+                linestyle="None", zorder=10, gid="max_line")
+        ax.text(xs[i_max], ys[i_max], z_plot[i_max],
+                f" {vals_arr[i_max]:.3f} {unit}", color="black", fontsize=7,
+                fontweight="bold", ha="left", va="bottom", zorder=11,
+                gid="max_line",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
+                          alpha=0.8, edgecolor="none"))
+
+        ax.plot([xs[i_min]], [ys[i_min]], [z_plot[i_min]],
+                marker="o", markersize=8, color="black",
+                markeredgecolor="white", markeredgewidth=1.5,
+                linestyle="None", zorder=10, gid="min_line")
+        ax.text(xs[i_min], ys[i_min], z_plot[i_min],
+                f" {vals_arr[i_min]:.3f} {unit}", color="black", fontsize=7,
+                fontweight="bold", ha="right", va="top", zorder=11,
+                gid="min_line",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
+                          alpha=0.8, edgecolor="none"))
+
+        for j, (xj, yj, vj) in enumerate(zip(xs, ys, vals_arr)):
+            if abs(vj) <= 1e-6 or j in (i_max, i_min):
+                continue
+            ax.text(xj, yj, z_plot[j], f" {vj:.3f} {unit}",
+                    color="#555555", fontsize=7, zorder=6, gid="all_vals",
+                    bbox=dict(boxstyle="round,pad=0.1", facecolor="white",
+                              alpha=0.7, edgecolor="none"))
+
+    # ── Hover annotations ────────────────────────────────────────────────
+    if _MPLCURSORS and _scatter_objs:
+        cursor = mplcursors.cursor(_scatter_objs, hover=True)
+        fig._custom_cursor = cursor
+        fig._hover_timers = {}
+
+        @cursor.connect("add")
+        def on_add(sel, _data=_scatter_data, _label=label, _unit=unit):
+            nids, xs_g, ys_g, vals_g = _data[id(sel.artist)]
+            idx = sel.index
+            sel.annotation.set_text(
+                f"Node {nids[idx]}\nSpan: {xs_g[idx]:.2f} m\n"
+                f"Width: {ys_g[idx]:.2f} m\n{_label}: {vals_g[idx]:.3f} {_unit}"
+            )
+            sel.annotation.get_bbox_patch().set(
+                fc="white", alpha=0.9, edgecolor="#BBBBBB"
+            )
+
+            sel_id = id(sel)
+            if sel_id in fig._hover_timers:
+                fig._hover_timers[sel_id].stop()
+
+            timer = fig.canvas.new_timer(interval=3000)
+            timer.single_shot = True
+            fig._hover_timers[sel_id] = timer
+
+            def auto_hide():
+                try:
+                    sel.annotation.set_visible(False)
+                    fig.canvas.draw_idle()
+                except Exception:
+                    pass
+                finally:
+                    fig._hover_timers.pop(sel_id, None)
+
+            timer.add_callback(auto_hide)
+            timer.start()
+
+    _add_supports(ax, nodes, members, edge_dist=0.0, selected_girder="All")
+    _add_node_number_labels(ax, nodes)
+    _add_element_number_labels(ax, nodes, members)
+
+    ax.set_xlabel("Span Length (m)", fontsize=10, fontweight="bold", labelpad=8)
+    ax.set_ylabel("Bridge Width (m)", fontsize=10, fontweight="bold", labelpad=8)
+    ax.set_zlabel(f"{label} ({unit})", fontsize=10, fontweight="bold", labelpad=8)
+    _set_value_axis_tick_formatter(ax, v_scale)
+
+    zmin = min(0.0, global_vmin)
+    zmax = max(0.0, global_vmax)
+    z_span = max(1e-9, zmax - zmin)
+    pad = max(1e-6, 0.05 * z_span)
+    ax.set_zlim(zmin - pad, zmax + pad)
+    ax.set_box_aspect([x_range, y_range, max(x_range * 0.35 * v_scale, 1e-6)])
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4, steps=[1, 2, 2.5, 5, 10]))
+
+    ax.set_title(
+        f"{group_label}  —  {label} ({unit})",
+        fontsize=12, fontweight="bold", pad=12,
+    )
+    fig._eng_scale = v_scale
+    ax.view_init(elev=DEFAULT_ELEV, azim=DEFAULT_AZIM)
+
+    for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+        pane.fill = False
+        pane.set_edgecolor("#555555")
+        pane.set_linewidth(1.5)
+        pane.set_alpha(1.0)
+
+    ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
+    _add_coordinate_triad(ax, nodes, eng_scale=v_scale)
+    ax.set_axis_off()
+
+    summary_data = {}
+    if overall_max is not None and overall_min is not None:
+        summary_data[group_label] = {
+            "max": overall_max[0],
+            "min": overall_min[0],
+        }
+    return fig, summary_data
+
+
 def figure_to_bytes(fig, fmt="png", dpi=150):
     """Convenience helper — render a matplotlib figure to raw bytes."""
     buf = io.BytesIO()

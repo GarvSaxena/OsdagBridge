@@ -5,7 +5,7 @@ Author: Arushi
 """
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QSplitter, QScrollArea, QHBoxLayout, QPushButton, QLabel
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, Signal
 from .cad_cross_section import CrossSectionCADWidget
 from .cad_top_view import TopViewCADWidget
 from osdagbridge.core.utils.common import *
@@ -17,7 +17,10 @@ from osdagbridge.desktop.cad.irc5_geometry import (
 
 class BridgeDualCADWidget(QWidget):
     """Split view widget showing both cross-section and top view with individual controls"""
-    
+
+    # Relayed from the two child CAD widgets when an editable label is changed.
+    parameter_edited = Signal(str, float)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cross_zoom_level = 1.0
@@ -62,6 +65,10 @@ class BridgeDualCADWidget(QWidget):
         # Create top view scroll area
         self.top_view_widget = TopViewCADWidget(self)
         # self.top_view_widget.setMinimumSize(800, 600)
+
+        # Relay inline CAD label edits to listeners (template page).
+        self.cross_section_widget.parameter_edited.connect(self.parameter_edited)
+        self.top_view_widget.parameter_edited.connect(self.parameter_edited)
         
         self.top_scroll = QScrollArea()
         self.top_scroll.setWidget(self.top_view_widget)

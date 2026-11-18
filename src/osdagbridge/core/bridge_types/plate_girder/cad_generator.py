@@ -47,6 +47,13 @@ from osdagbridge.core.bridge_components.super_structure.median.builder import (
 from osdagbridge.core.bridge_components.super_structure.cross_bracing.builder import (
     build_cross_bracings
 )
+from osdagbridge.core.bridge_components.sub_structure.substructure import (
+    bearing_level,
+    build_substructure,
+)
+from osdagbridge.core.bridge_components.sub_structure.params import (
+    SubstructureParameters,
+)
 
 from osdagbridge.core.bridge_types.plate_girder.dto import (
     BridgeParametersDTO,
@@ -60,6 +67,11 @@ KEY_CAD_DECK = "Deck"
 KEY_CAD_CRASH_BARRIER = "Crash Barrier"
 KEY_CAD_RAILING = "Railing"
 KEY_CAD_MEDIAN = "Median"
+KEY_CAD_PIER_CAP = "Pier Cap"
+KEY_CAD_PIER = "Pier"
+KEY_CAD_PILE_CAP = "Pile Cap"
+KEY_CAD_PILE = "Pile"
+KEY_CAD_REINFORCEMENT = "Reinforcement"
 KEY_MODULE_PG = "Plate Girder"
 
 
@@ -316,6 +328,17 @@ class PlateGirderCADGenerator:
             "web_thickness": design_params.end_diaphragm_dims.web_thickness,
             "flange_thickness": design_params.end_diaphragm_dims.flange_thickness,
         }   
+
+        # SUBSTRUCTURE PARAMETERS
+        # The DTO may carry a SubstructureParameters object (parametric
+        # override); otherwise the defaults from the screening task are used.
+        substructure = getattr(design_params, "substructure", None)
+        if substructure is None:
+            substructure = SubstructureParameters()
+        elif isinstance(substructure, dict):
+            substructure = SubstructureParameters(**substructure)
+        self.substructure_params = substructure
+        self.substructure_layout = None
 
     def get_girder_depth_at(self, girder_idx, x):
         """
@@ -883,7 +906,25 @@ class PlateGirderCADGenerator:
             skew_angle=self.skew_angle
         )
 
-        # STEP 11: CONSOLIDATE SUPPORT STRUCTURES
+        # STEP 11: BUILD SUBSTRUCTURE (PIER CAP -> PIER -> PILE CAP -> PILES)
+        #
+        # The substructure is stacked downwards from the underside of the
+        # girder bottom flanges, at each end of the span.  All concrete and
+        # reinforcement is produced by the component builders in
+        # core/bridge_components/{sub_structure,foundation}/.
+        deck_bottom_z = bearing_level(self.girder_section_d, self.girder_section_tf_b)
+        substructure = build_substructure(
+            support_x_positions=[0.0, self.span_length_L],
+            support_y=0.0,
+            deck_width=deck_out["total_deck_width"],
+            deck_bottom_z=deck_bottom_z,
+            skew_angle=self.skew_angle,
+            params=self.substructure_params,
+        )
+        # Cached for the IFC exporter (camera-ready layout, no re-derivation).
+        self.substructure_layout = substructure["layout"]
+
+        # STEP 12: CONSOLIDATE SUPPORT STRUCTURES
 
         # Compound cross bracings
         if cross_bracings:
@@ -956,7 +997,21 @@ class PlateGirderCADGenerator:
             "median_w_beams": median_w_beams,
             
             # Railings
-            "railings": railings
+            "railings": railings,
+
+            # Substructure (piers, pier caps, pile caps, piles, reinforcement)
+            "pier_caps": substructure["pier_caps"],
+            "piers": substructure["piers"],
+            "pile_caps": substructure["pile_caps"],
+            "piles": substructure["piles"],
+            "pier_cap_reinforcement": substructure["pier_cap_reinforcement"],
+            "pier_reinforcement": substructure["pier_reinforcement"],
+            "pile_cap_reinforcement": substructure["pile_cap_reinforcement"],
+            "pile_reinforcement": substructure["pile_reinforcement"],
+            "reinforcement": substructure["reinforcement"],
+            "reinforcement_compound": substructure["reinforcement_compound"],
+            "substructure_layout": substructure["layout"],
+            "substructure_params": substructure["params"],
         }
 
     def create3Dcad(self):
@@ -1011,9 +1066,19 @@ class PlateGirderCADGenerator:
             return solids if solids else [shape]
 
         # Collect shapes from model_data, excluding support geometry from export.
+        # Reinforcement is intentionally excluded from the fused BREP export:
+        # the bar schedule is carried by the IFC file (IfcReinforcingBar), and
+        # exploding ~2.7k cylinders here would make STEP/IGES export unusably
+        # slow.
+        _EXPORT_EXCLUDED = {
+            "supports", "supports_tri", "supports_cyl",
+            "reinforcement", "reinforcement_compound",
+            "pier_reinforcement", "pier_cap_reinforcement",
+            "pile_cap_reinforcement", "pile_reinforcement",
+        }
         shapes = []
         for key, v in self.model_data.items():
-            if key in {"supports", "supports_tri", "supports_cyl"}:
+            if key in _EXPORT_EXCLUDED:
                 continue
             shapes.extend(_flatten(v))
 
@@ -1053,7 +1118,12 @@ class PlateGirderCADGenerator:
                             KEY_CAD_DECK: "Deck",
                             KEY_CAD_CRASH_BARRIER: "Crash Barrier",
                             KEY_CAD_RAILING: "Railing",
-                            KEY_CAD_MEDIAN: "Median"
+                            KEY_CAD_MEDIAN: "Median",
+                            KEY_CAD_PIER_CAP: "Pier Cap",
+                            KEY_CAD_PIER: "Pier",
+                            KEY_CAD_PILE_CAP: "Pile Cap",
+                            KEY_CAD_PILE: "Pile",
+                            KEY_CAD_REINFORCEMENT: "Reinforcement"
         }
 
         GIRDER_COLOR = Quantity_Color(72/255, 72/255, 54/255, Quantity_TOC_RGB)
@@ -1063,6 +1133,9 @@ class PlateGirderCADGenerator:
         BRACING_COLOR = Quantity_Color(60/255, 60/255, 60/255, Quantity_TOC_RGB)
         RAILING_COLOR = Quantity_Color(120/255, 120/255, 120/255, Quantity_TOC_RGB)
         MEDIAN_COLOR = Quantity_Color(120/255, 120/255, 120/255, Quantity_TOC_RGB)
+        CONCRETE_COLOR = Quantity_Color(190/255, 190/255, 185/255, Quantity_TOC_RGB)
+        REBAR_COLOR = Quantity_Color(120/255, 90/255, 60/255, Quantity_TOC_RGB)
+        concrete_transparency = self.substructure_params.concrete_transparency
 
         self.component = component  
         
@@ -1100,6 +1173,31 @@ class PlateGirderCADGenerator:
             label = [KEY_CAD_MEDIAN, hover_dict.get(KEY_CAD_MEDIAN)]
             shapes = self.model_data["median_barriers"]
             osdag_display_shape(self.display, shapes, color=MEDIAN_COLOR, update=True, label=label, canvas=self.cad_widget)
+
+        elif self.component == "Pier Cap":
+            label = [KEY_CAD_PIER_CAP, hover_dict.get(KEY_CAD_PIER_CAP)]
+            shapes = self.model_data["pier_caps"]
+            osdag_display_shape(self.display, shapes, color=CONCRETE_COLOR, transparency=concrete_transparency, update=True, label=label, canvas=self.cad_widget)
+
+        elif self.component == "Pier":
+            label = [KEY_CAD_PIER, hover_dict.get(KEY_CAD_PIER)]
+            shapes = self.model_data["piers"]
+            osdag_display_shape(self.display, shapes, color=CONCRETE_COLOR, transparency=concrete_transparency, update=True, label=label, canvas=self.cad_widget)
+
+        elif self.component == "Pile Cap":
+            label = [KEY_CAD_PILE_CAP, hover_dict.get(KEY_CAD_PILE_CAP)]
+            shapes = self.model_data["pile_caps"]
+            osdag_display_shape(self.display, shapes, color=CONCRETE_COLOR, transparency=concrete_transparency, update=True, label=label, canvas=self.cad_widget)
+
+        elif self.component == "Pile":
+            label = [KEY_CAD_PILE, hover_dict.get(KEY_CAD_PILE)]
+            shapes = self.model_data["piles"]
+            osdag_display_shape(self.display, shapes, color=CONCRETE_COLOR, transparency=concrete_transparency, update=True, label=label, canvas=self.cad_widget)
+
+        elif self.component == "Reinforcement":
+            label = [KEY_CAD_REINFORCEMENT, hover_dict.get(KEY_CAD_REINFORCEMENT)]
+            shapes = self.model_data["reinforcement_compound"]
+            osdag_display_shape(self.display, shapes, color=REBAR_COLOR, update=True, label=label, canvas=self.cad_widget)
 
 
 def osdag_display_shape(display, shapes, material=None, texture=None, color=None, transparency=None, update=False, label=[], canvas=None):

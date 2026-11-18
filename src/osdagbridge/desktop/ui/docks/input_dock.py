@@ -1045,6 +1045,53 @@ class InputDock(QWidget):
         else:
             print("[ERROR]: template_page.input_dictionary Not Found")
 
+    def set_input_value(self, key: str, value) -> bool:
+        """
+        Programmatically set a basic input field and run the normal validation path.
+
+        Used by inline 2D-CAD label editing so that validation, input-dict
+        updates and the ``input_value_changed`` redraw all reuse the same
+        existing pipeline as a user edit.
+
+        Returns True when a widget for ``key`` exists and the value was applied.
+        """
+        if not self.input_widget:
+            return False
+
+        widget = self.input_widget.findChild(QWidget, key)
+        if widget is None:
+            return False
+
+        if isinstance(widget, QLineEdit):
+            widget.blockSignals(True)
+            widget.setText(self._format_input_value(value))
+            widget.blockSignals(False)
+            self._on_field_edited(key, widget)
+            return True
+
+        if isinstance(widget, QComboBox):
+            text = str(value)
+            if widget.findText(text) < 0:
+                widget.addItem(text)
+            widget.blockSignals(True)
+            widget.setCurrentText(text)
+            widget.blockSignals(False)
+            self._on_field_edited(key, text)
+            return True
+
+        return False
+
+    @staticmethod
+    def _format_input_value(value) -> str:
+        """Format a numeric value for a QLineEdit without trailing zeros."""
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if abs(num - round(num)) < 1e-9:
+            return str(int(round(num)))
+        return f"{num:.3f}".rstrip("0").rstrip(".")
+
     def populate_from_dict(self, data: dict) -> None:
         """
         Push all values from *data* into the input dock widgets and parent.input_dict.
