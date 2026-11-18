@@ -58,6 +58,7 @@ from osdagbridge.core.bridge_types.plate_girder.cad_generator import (
     PlateGirderCADGenerator
 )
 from osdagbridge.core.bridge_types.plate_girder import results_data
+from osdagbridge.core.bridge_components.sub_structure.params import SubstructureParameters
 
 # Custom 3D Viewer
 from osdagbridge.desktop.ui.utils.custom_3dviewer import CustomViewer3d
@@ -285,6 +286,14 @@ class CAD3DWindow(QWidget):
         BARRIER_POST_COLOR = Quantity_Color(20/255, 20/255, 20/255, Quantity_TOC_RGB)
         SUPPORT_COLOR = Quantity_Color(20/255.0, 20/255.0, 20/255.0, Quantity_TOC_RGB)
 
+        # Substructure palette — concrete is semi-transparent (opacity 0.35),
+        # reinforcement is opaque steel so it reads clearly through the
+        # concrete.
+        CONCRETE_COLOR = Quantity_Color(190/255.0, 190/255.0, 185/255.0, Quantity_TOC_RGB)
+        REBAR_COLOR = Quantity_Color(0.60, 0.45, 0.28, Quantity_TOC_RGB)  # steel / rust
+        sub_params = getattr(params, "substructure", None) or SubstructureParameters()
+        CONCRETE_TRANSPARENCY = sub_params.concrete_transparency  # 0.65 => 35 % opaque
+
 
 
         # HELPER 
@@ -465,6 +474,65 @@ class CAD3DWindow(QWidget):
             "Railing",
             f"Railing\nType: {params.railing_type.upper()}\nRails: {params.rail_count}\nWidth: {params.railing_width:.2f} mm",
             BARRIER_COLOR
+        )
+
+        # ── SUBSTRUCTURE ─────────────────────────────────────────────────────
+        # Concrete solids are drawn semi-transparent (opacity 0.35) and the
+        # rebar is drawn opaque on top, so the cage is visible through the
+        # concrete exactly as required by the task.
+        display_and_register(
+            cad_data.get("pier_caps", []),
+            "Pier Cap",
+            f"Pier Cap\nTop Width: {sub_params.pier_cap_top_width:.0f} mm\n"
+            f"Bottom Width: {sub_params.pier_cap_bottom_width:.0f} mm\n"
+            f"Depth: {sub_params.pier_cap_depth:.0f} mm\n"
+            f"Concrete: {params.concrete_grade}",
+            CONCRETE_COLOR,
+            transparency=CONCRETE_TRANSPARENCY,
+        )
+
+        display_and_register(
+            cad_data.get("piers", []),
+            "Pier",
+            f"Pier\nDiameter: {sub_params.pier_diameter:.0f} mm\n"
+            f"Height: {sub_params.pier_height:.0f} mm\n"
+            f"Concrete: {params.concrete_grade}",
+            CONCRETE_COLOR,
+            transparency=CONCRETE_TRANSPARENCY,
+        )
+
+        display_and_register(
+            cad_data.get("pile_caps", []),
+            "Pile Cap",
+            f"Pile Cap\nLength: {sub_params.pile_cap_length:.0f} mm\n"
+            f"Width: {sub_params.pile_cap_width:.0f} mm\n"
+            f"Depth: {sub_params.pile_cap_depth:.0f} mm\n"
+            f"Concrete: {params.concrete_grade}",
+            CONCRETE_COLOR,
+            transparency=CONCRETE_TRANSPARENCY,
+        )
+
+        display_and_register(
+            cad_data.get("piles", []),
+            "Pile",
+            f"Pile\nDiameter: {sub_params.pile_diameter:.0f} mm\n"
+            f"Length: {sub_params.pile_length:.0f} mm\n"
+            f"Count / cap: {sub_params.n_piles_per_cap}\n"
+            f"Concrete: {params.concrete_grade}",
+            CONCRETE_COLOR,
+            transparency=CONCRETE_TRANSPARENCY,
+        )
+
+        display_and_register(
+            cad_data.get("reinforcement_compound", []),
+            "Reinforcement",
+            f"Reinforcement\nMain bars: \u2300{sub_params.rebar_main_diameter:.0f} mm "
+            f"@ {sub_params.rebar_spacing_longitudinal:.0f} mm\n"
+            f"Transverse: \u2300{sub_params.rebar_transverse_diameter:.0f} mm "
+            f"@ {sub_params.rebar_spacing_transverse:.0f} mm\n"
+            f"Cover: {sub_params.rebar_cover:.0f} mm",
+            REBAR_COLOR,
+            selectable=False,
         )
 
         # Nodes and grillage overlays
@@ -716,6 +784,8 @@ class CAD3DWindow(QWidget):
             "Crash Barrier": ["Crash Barrier", "Crash Barrier W-Beam"],
             "Median":        ["Median", "Median W-Beam"],
             "Railing":       ["Railing"],
+            "Substructure":  ["Pier Cap", "Pier", "Pile Cap", "Pile"],
+            "Reinforcement": ["Reinforcement"],
             "Grillage":      ["Grillage"],
             "Node":          ["Node"],
         }
@@ -1209,6 +1279,8 @@ class BridgeComponentCheckbox(QWidget):
         ("Crash Barrier", "Crash Barrier"),
         ("Median",        "Median"),
         ("Railing",       "Railing"),
+        ("Substructure",  "Substructure"),
+        ("Reinforcement", "Reinforcement"),
         ("Grillage view", "Grillage"),
         ("Node",          "Node"),
         ("Node Numbers",  "NodeNumbers"),

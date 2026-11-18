@@ -277,3 +277,70 @@ class BridgeMetadataMapper:
             
         if props:
             self.assign_metadata(element, props)
+
+    # ------------------------------------------------------------------
+    # Substructure
+    # ------------------------------------------------------------------
+
+    def map_substructure(self, element, cad, item):
+        """Attach concrete/substructure metadata to a pier, cap or pile."""
+        if not cad:
+            return
+
+        concrete_grade = getattr(cad, "concrete_grade", "M30")
+        role = {
+            "pier": "Pier",
+            "pier_cap": "Pier Cap",
+            "pile_cap": "Pile Cap",
+            "pile": "Pile",
+        }.get(item.get("kind"), "Substructure")
+
+        props = {
+            "ComponentRole": role,
+            "Material": concrete_grade,
+            "ConcreteGrade": concrete_grade,
+            "ElementType": item.get("kind", ""),
+            "TopLevel": self._to_meters(item.get("z_top")),
+            "BottomLevel": self._to_meters(item.get("z_bottom")),
+        }
+
+        if item.get("kind") in ("pier", "pile"):
+            props["Diameter"] = self._to_meters(item.get("diameter"))
+            props["Height"] = self._to_meters(
+                item.get("height") or item.get("length")
+            )
+
+        if item.get("kind") == "pier_cap":
+            props["Length"] = self._to_meters(item.get("length"))
+            props["TopWidth"] = self._to_meters(item.get("top_width"))
+            props["BottomWidth"] = self._to_meters(item.get("bottom_width"))
+            props["Depth"] = self._to_meters(item.get("cap_depth"))
+
+        if item.get("kind") == "pile_cap":
+            props["Length"] = self._to_meters(item.get("length"))
+            props["Width"] = self._to_meters(item.get("width"))
+            props["Depth"] = self._to_meters(item.get("cap_depth"))
+
+        db_props = self._lookup_material_properties(concrete_grade, is_steel=False)
+        props.update(db_props)
+        self.assign_metadata(element, props)
+
+    def map_rebar(self, element, cad, group):
+        """Attach the bar schedule of one reinforcing-bar group."""
+        if not cad:
+            return
+
+        steel_grade = "Fe 500"
+        props = {
+            "ComponentRole": "Reinforcement",
+            "BarRole": group.get("role", "MAIN"),
+            "BarDiameter": self._to_meters(group.get("diameter")),
+            "BarCount": int(group.get("bar_count", 0)),
+            "TotalBarLength": self._to_meters(group.get("total_length")),
+            "Material": steel_grade,
+        }
+        db_props = self._lookup_material_properties(steel_grade, is_steel=True)
+        props.update(db_props)
+        self.assign_metadata(
+            element, props, property_set_name="Pset_ReinforcementProperties"
+        )

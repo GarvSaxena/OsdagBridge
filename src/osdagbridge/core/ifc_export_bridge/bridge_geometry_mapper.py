@@ -31,7 +31,7 @@ class BridgeGeometryMapper:
     def define_material(self, name="Steel"):
         mat = self.file.createIfcMaterial(name)
         return mat
-        
+
     def create_cartesian_point_2d(self, x, y):
         return self.file.createIfcCartesianPoint((float(x), float(y)))
 
@@ -49,10 +49,14 @@ class BridgeGeometryMapper:
         xdr = self.file.createIfcDirection([float(v) for v in x_dir])
         return self.file.createIfcAxis2Placement2D(pt, xdr)
 
-    def apply_color(self, shape_rep, rgb_tuple):
+    def apply_color(self, shape_rep, rgb_tuple, transparency=0.0):
         """Applies an RGB color to an IfcShapeRepresentation."""
         rgb = self.file.createIfcColourRgb(None, float(rgb_tuple[0]), float(rgb_tuple[1]), float(rgb_tuple[2]))
-        surf_style = self.file.createIfcSurfaceStyleRendering(SurfaceColour=rgb)
+        surf_style = self.file.createIfcSurfaceStyleRendering(
+            SurfaceColour=rgb,
+            Transparency=float(transparency),
+            ReflectanceMethod="NOTDEFINED",
+        )
         surface_style = self.file.createIfcSurfaceStyle(None, "BOTH", [surf_style])
         for item in shape_rep.Items:
             self.file.createIfcStyledItem(item, [surface_style], None)
@@ -64,6 +68,14 @@ class BridgeGeometryMapper:
             ProfileType="AREA", ProfileName=None,
             Position=self.create_axis2placement_2d(),
             XDim=float(width), YDim=float(height)
+        )
+
+    def create_circular_profile(self, radius, name="CircularProfile"):
+        """Circular profile used for piers and piles (and reinforcing bars)."""
+        return self.file.createIfcCircleProfileDef(
+            ProfileType="AREA", ProfileName=name,
+            Position=self.create_axis2placement_2d(),
+            Radius=float(radius),
         )
         
     def create_l_shape_profile(self, depth, width, thickness):
@@ -224,3 +236,56 @@ class BridgeGeometryMapper:
         ifc_faces = [self.file.createIfcFace([bnd]) for bnd in faces]
         shell = self.file.createIfcClosedShell(ifc_faces)
         return self.file.createIfcFacetedBrep(shell)
+
+    # --- MATERIAL / QUANTITY HELPERS (BOQ-READY) ---
+
+    def get_or_create_material(self, name):
+        """Return a single ``IfcMaterial`` per name (cached per file)."""
+        if not hasattr(self, "_material_cache"):
+            self._material_cache = {}
+        if name not in self._material_cache:
+            self._material_cache[name] = self.file.createIfcMaterial(name)
+        return self._material_cache[name]
+
+    def assign_material(self, element, material_name, owner_history=None):
+        """Attach ``IfcMaterial`` to an element so a BOQ can group by material."""
+        material = self.get_or_create_material(material_name)
+        self.file.createIfcRelAssociatesMaterial(
+            create_ifc_guid(), owner_history, None, None, [element], material
+        )
+
+    def assign_quantities(self, element, qset_name, quantities, owner_history=None):
+        """
+        Attach an ``IfcElementQuantity`` to an element.
+
+        ``quantities`` maps a quantity name to ``(kind, value)`` where kind is
+        one of ``length``, ``area``, ``volume``, ``weight`` or ``count``.
+        Values are expressed in the project units (metres / m2 / m3 / kg).
+        """
+        creators = {
+            "length": ("IfcQuantityLength", "LengthValue"),
+            "area": ("IfcQuantityArea", "AreaValue"),
+            "volume": ("IfcQuantityVolume", "VolumeValue"),
+            "weight": ("IfcQuantityWeight", "WeightValue"),
+            "count": ("IfcQuantityCount", "CountValue"),
+        }
+
+        ifc_quantities = []
+        for q_name, (kind, value) in quantities.items():
+            if value is None:
+                continue
+            entity_name, _value_attr = creators[kind]
+            ifc_quantities.append(
+                self.file.create_entity(entity_name, q_name, None, None, float(value))
+            )
+
+        if not ifc_quantities:
+            return
+
+        quantity_set = self.file.createIfcElementQuantity(
+            create_ifc_guid(), owner_history, qset_name, None, "Osdag parametric take-off", ifc_quantities
+        )
+        self.file.createIfcRelDefinesByProperties(
+            create_ifc_guid(), owner_history, None, None, [element], quantity_set
+        )
+        return quantity_set

@@ -35,6 +35,13 @@ from osdagbridge.core.bridge_components.super_structure.crash_barrier.builder im
 from osdagbridge.core.bridge_components.super_structure.plate_girder.builder import (
     END_STIFFENER_SPACING
 )
+from osdagbridge.core.bridge_components.sub_structure.substructure import (
+    bearing_level,
+    compute_substructure,
+)
+from osdagbridge.core.bridge_components.sub_structure.params import (
+    SubstructureParameters,
+)
 from osdagbridge.desktop.cad.irc5_geometry import (
     CrashBarrierGeometry,
     MedianGeometry,
@@ -125,8 +132,38 @@ class PlateGirderIFCExtractor:
             "cross_bracings": self._extract_cross_bracings(n_girders, spacing),
             "deck_slab": self._extract_deck_slab(total_width),
             "crash_barriers": self._extract_safety_components(total_width, actual_base_width, actual_railing_width),
-            "supports": self._extract_supports(n_girders, spacing)
+            "supports": self._extract_supports(n_girders, spacing),
+            "substructure": self._extract_substructure(total_width),
         }
+
+    def _extract_substructure(self, total_width):
+        """
+        Build the same parametric substructure layout the CAD generator uses.
+
+        The layout is OCC-free, so the IFC exporter and the 3-D view can never
+        disagree about a pier's position, a pile's spacing or the rebar cage.
+        """
+        params = getattr(self.cad, "substructure", None)
+        if params is None:
+            params = getattr(self.cad, "substructure_params", None)
+        if isinstance(params, dict):
+            params = SubstructureParameters(**params)
+        if params is None:
+            params = SubstructureParameters()
+
+        deck_bottom = bearing_level(
+            getattr(self.cad, "girder_section_d", 0.0),
+            getattr(self.cad, "girder_section_tf_b", 0.0),
+        )
+
+        return compute_substructure(
+            support_x_positions=[0.0, float(getattr(self.cad, "span_length_L", 0.0))],
+            support_y=0.0,
+            deck_width=float(total_width),
+            deck_bottom_z=deck_bottom,
+            skew_angle=self.skew_angle,
+            params=params,
+        )
 
     def _solve_girder_layout(self, total_width):
         """
